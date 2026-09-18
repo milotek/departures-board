@@ -288,6 +288,7 @@ int raildataXmlClient::fetchDepartures(rdStation *station, stnMessages *messages
       xStation->service[i].trainLength=0;
       xStation->service[i].classesAvailable=0;
       xStation->service[i].serviceType=0;
+      xStation->service[i].journeyMins=0;
       xStation->service[i].isCancelled=false;
       xStation->service[i].isDelayed=false;
     }
@@ -372,6 +373,8 @@ int raildataXmlClient::fetchDepartures(rdStation *station, stnMessages *messages
     tagLevel = 0;
     loadingWDSL = false;
     fetchingDepartures = true;
+    strlcpy(filterCrs,callingCrsCode,sizeof(filterCrs));
+    atFilterStop = false;
     long dataReceived = 0;
     if (platforms[0]) {
         filterPlatforms = true;
@@ -515,6 +518,7 @@ void raildataXmlClient::loadDepartures(rdStation *station, stnMessages *messages
         station->service[i].classesAvailable = xStation->service[i].classesAvailable;
         strcpy(station->service[i].opco, xStation->service[i].opco);
         station->service[i].serviceType = xStation->service[i].serviceType;
+        station->service[i].journeyMins = xStation->service[i].journeyMins;
     }
     if (xStation->numServices) {
         strcpy(station->calling,xStation->service[0].calling);
@@ -669,6 +673,15 @@ void raildataXmlClient::deleteService(int x) {
     xStation->service[i] = xStation->service[i+1];
   }
   xStation->numServices--;
+}
+
+// Minutes from this service's departure to the given time at the filtered calling point.
+// Both the arrival estimate and the departure time can be non-numeric ("Delayed"), in
+// which case there is no journey time to show.
+int raildataXmlClient::journeyTo(const char *arrivalTime) {
+    if (!isdigit(arrivalTime[0]) || !isdigit(xStation->service[id].sTime[0])) return 0;
+    int mins = timeDiff(arrivalTime,xStation->service[id].sTime);
+    return mins > 0 ? mins : 0;
 }
 
 int raildataXmlClient::timeDiff(const char *scheduled, const char *actual) {
@@ -828,9 +841,14 @@ void raildataXmlClient::value(const char *value)
                 strcat(xStation->service[id].calling,value);
                 addedStopLocation = true;
             }
+            atFilterStop = false;
+            return;
+        } else if (tagLevel == 11 && tagPath.endsWith("callingPoint/lt8:crs") && addedStopLocation) {
+            atFilterStop = (filterCrs[0] && equalsIgnoreCase(value,strlen(value),filterCrs));
             return;
         } else if (tagLevel == 11 && tagPath.endsWith("callingPoint/lt8:st") && addedStopLocation) {
             strlcpy(stcp,value,sizeof(stcp));
+            if (atFilterStop) xStation->service[id].journeyMins = journeyTo(stcp);
             return;
         } else if (tagLevel == 11 && tagPath.endsWith("callingPoint/lt8:et") && addedStopLocation) {
             if (isdigit(value[0])) strlcpy(stcp,value,sizeof(stcp)); // Use the eta if available
@@ -840,9 +858,13 @@ void raildataXmlClient::value(const char *value)
                 strcat(xStation->service[id].calling,stcp);
                 strcat(xStation->service[id].calling,")");
             }
+            if (atFilterStop) xStation->service[id].journeyMins = journeyTo(stcp);
             return;
         } else if (tagLevel == 11 && tagPath.endsWith("callingPoint/lt8:isCancelled") && addedStopLocation) {
-            if (strcmp(value,"true")==0) *endCAL = '\0'; // remove this calling point, it's cancelled
+            if (strcmp(value,"true")==0) {
+                *endCAL = '\0'; // remove this calling point, it's cancelled
+                if (atFilterStop) xStation->service[id].journeyMins = 0; // the train no longer gets there
+            }
             addedStopLocation = false;
             return;
         } else if (tagLevel == 11 && tagName == "lt7:coachClass") {

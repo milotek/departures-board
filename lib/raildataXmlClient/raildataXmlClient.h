@@ -65,12 +65,16 @@ class raildataXmlClient: public xmlListener {
         bool filterPlatforms = false;
         bool keepRoute = false;
 
+        char filterCrs[4];
+        bool atFilterStop = false;
+
         static bool compareTimes(const rdiService& a, const rdiService& b);
         void removeHtmlTags(char* input);
         void replaceWord(char* input, const char* target, const char* replacement);
         void pruneFromPhrase(char* input, const char* target);
         void fixFullStop(char* input);
         int timeDiff(const char *scheduled, const char *actual);
+        int journeyTo(const char *arrivalTime);
         void sanitiseData();
         void deleteService(int x);
         void trim(char* &start, char* &end);

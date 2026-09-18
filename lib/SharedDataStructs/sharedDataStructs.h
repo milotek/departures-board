@@ -38,6 +38,8 @@ struct rdService {
     int trainLength;
     byte classesAvailable;
     char opco[50];
+    char fromCrs[4];    // Station this service departs from (only set on combined boards)
+    int journeyMins;    // Journey time to the "calling at" station, 0 if not filtering
 
     int serviceType;
     int timeToStation;  // Only for TfL
@@ -70,6 +72,7 @@ struct rdService {
     char calling[MAXCALLINGSIZE];
     char serviceMessage[MAXMESSAGESIZE];
     int serviceType;
+    int journeyMins;
     char serviceID[18];
     char sortTime[6];
   };

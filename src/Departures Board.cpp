@@ -326,6 +326,13 @@ rdStation station;
 // Station Messages (shared)
 stnMessages messages;
 
+// Combined board data. Each station keeps its own board between refreshes so that the
+// data clients still compare like with like and can report what actually changed.
+rdStation stationOne;
+rdStation stationTwo;
+stnMessages messagesOne;
+stnMessages messagesTwo;
+
 // Data transfer clients
 rdmRailClient rdmRailData(&xfrStation,&xfrMessages,&jsonKeyBuffer);
 raildataXmlClient darwinRailData(&xfrStation,&xfrMessages,&jsonKeyBuffer);
@@ -426,6 +433,9 @@ static String rdmServiceApiKey = "";       // RDM Consumer key for ServiceDetail
 static char tflAppKey[33] = "";            // TfL app_key (not usually needed)
 static char callingCrsCode[4] = "";        // Station code to filter routes on
 static char callingStation[45] = "";       // Calling filter station friendly name
+static char combineCrsCode[4] = "";        // Second station code to combine onto the rail board
+static char combineStation[MAXLOCATIONSIZE] = ""; // Second station friendly name
+static bool combineActive = false;         // Is a combined (two station) rail board active?
 static char lineId[33];                    // Underground line to filter on
 static char lineDirection[9];              // Underground direction filter
 static int busDestX;                       // Variable margin for bus destination
@@ -608,27 +618,33 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
 
   u8g2.setFont(NatRailSmall9);
   char boardTitle[95];
-  strlcpy(boardTitle,stopName,sizeof(boardTitle));
-  if (timeOffset || platFilter[0] || callingStopName[0]) strlcat(boardTitle," ",sizeof(boardTitle));
+  char boardFilters[90];
+  boardFilters[0] = '\0';
 
   if (timeOffset) {
     char offset[9];
     sprintf(offset,"\x8F%+dm ",timeOffset);
-    strlcat(boardTitle,offset,sizeof(boardTitle));
+    strlcat(boardFilters,offset,sizeof(boardFilters));
   }
   if (platFilter[0]) {
-    strlcat(boardTitle,(boardMode == MODE_BUS)?"\x8E":"\x8D",sizeof(boardTitle));
-    strlcat(boardTitle,platFilter,sizeof(boardTitle));
-    strlcat(boardTitle," ",sizeof(boardTitle));
+    strlcat(boardFilters,(boardMode == MODE_BUS)?"\x8E":"\x8D",sizeof(boardFilters));
+    strlcat(boardFilters,platFilter,sizeof(boardFilters));
+    strlcat(boardFilters," ",sizeof(boardFilters));
   }
   if (callingStopName[0]) {
-    strlcat(boardTitle,"(\x81",sizeof(boardTitle));
-    strlcat(boardTitle,callingStopName,sizeof(boardTitle));
-    strlcat(boardTitle,")",sizeof(boardTitle));
+    strlcat(boardFilters,"(\x81",sizeof(boardFilters));
+    strlcat(boardFilters,callingStopName,sizeof(boardFilters));
+    strlcat(boardFilters,")",sizeof(boardFilters));
   }
 
   int titleOffset = 0;
   if (schedulerActive || carouselActive) titleOffset = 13;
+
+  snprintf(boardTitle,sizeof(boardTitle),"%s%s%s",stopName,boardFilters[0]?" ":"",boardFilters);
+  if (combineActive && getStringWidth(boardTitle)+titleOffset >= SCREEN_WIDTH) {
+    // Two full station names rarely fit, so fall back to the codes shown against each service
+    snprintf(boardTitle,sizeof(boardTitle),"%s & %s%s%s",locationCode,combineCrsCode,boardFilters[0]?" ":"",boardFilters);
+  }
   int boardTitleWidth = getStringWidth(boardTitle);
 
   if (dateEnabled) {
@@ -1187,6 +1203,18 @@ void resetLocationIds() {
   railIsSet = false;
   tubeIsSet = false;
   busIsSet = false;
+
+  // Drop any combined board data so that a slot change can't merge the new stations
+  // with departures left over from the previous one
+  strcpy(combineCrsCode,"");
+  strcpy(combineStation,"");
+  combineActive = false;
+  stationOne.numServices = 0;
+  stationTwo.numServices = 0;
+  strcpy(stationOne.location,"");
+  strcpy(stationTwo.location,"");
+  messagesOne.numMessages = 0;
+  messagesTwo.numMessages = 0;
 }
 
 void saveFirmwareInfo() {
@@ -1244,8 +1272,12 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
       if (slot["platformFilter"].is<const char*>())   strlcpy(locationFilter, slot["platformFilter"], sizeof(locationFilter));
       if (slot["callingCrs"].is<const char*>())       strlcpy(callingCrsCode, slot["callingCrs"], sizeof(callingCrsCode));
       if (slot["callingStation"].is<const char*>())   strlcpy(callingStation, slot["callingStation"], sizeof(callingStation));
+      if (slot["combineCrs"].is<const char*>())       strlcpy(combineCrsCode, slot["combineCrs"], sizeof(combineCrsCode));
+      if (slot["combineStation"].is<const char*>())   strlcpy(combineStation, slot["combineStation"], sizeof(combineStation));
       if (slot["lat"].is<float>())                    locationLat = slot["lat"];
       if (slot["lon"].is<float>())                    locationLon = slot["lon"];
+      // Combining a station with itself would just double every departure up
+      combineActive = (combineCrsCode[0] && strcmp(combineCrsCode,locationCode));
       break;
 
     case MODE_TUBE:
@@ -1695,26 +1727,45 @@ bool checkForFirmwareUpdate() {
  * Station Board functions - pulling updates and animating the Departures Board main display
  */
 
+// The journey time to the "calling at" station. Long journeys read better as hours and
+// minutes than as a three digit count of minutes.
+bool formatJourneyTime(int mins, char *text, size_t size) {
+  text[0] = '\0';
+  if (!callingCrsCode[0] || mins <= 0) return false;
+  if (mins < 60) snprintf(text,size,"%dm",mins);
+  else snprintf(text,size,"%dh%02d",mins/60,mins%60);
+  return true;
+}
+
 // Draw the primary service line
 void drawPrimaryService(bool showVia) {
   int destPos;
   char clipDestination[MAXLOCATIONSIZE+5];
   char etd[16];
   char plat[9];
+  char journey[7];
 
   u8g2.setFont(NatRailTall12);
   blankArea(0,LINE1,256,LINE2-LINE1);
   destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
+  if (combineActive) destPos += u8g2.drawStr(destPos,LINE1-1,station.service[0].fromCrs) + 6;
   if (isDigit(station.service[0].etd[0])) sprintf(etd,"Exp %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
   int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
   u8g2.drawStr(SCREEN_WIDTH - etdWidth,LINE1-1,etd);
   int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
+  int journeyWidth = 0;
+  if (formatJourneyTime(station.service[0].journeyMins,journey,sizeof(journey))) {
+    journeyWidth = getStringWidth(journey) + (journey[strlen(journey)-1]=='1'?1:0) + 7;
+    u8g2.drawStr(SCREEN_WIDTH - etdWidth - journeyWidth,LINE1-1,journey);
+    spaceAvailable-=journeyWidth;
+  }
+
   if (station.platformAvailable && station.service[0].platform[0] && station.service[0].serviceType == TRAIN && !hidePlatform) {
     sprintf(plat,"Plat %.3s",station.service[0].platform);
     int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);;
-    u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,LINE1-1,plat);
+    u8g2.drawStr(SCREEN_WIDTH - etdWidth - journeyWidth - platWidth - 7,LINE1-1,plat);
     spaceAvailable-=(platWidth+7);
   }
 
@@ -1741,6 +1792,7 @@ void drawServiceLine(int line, int y) {
   char clipDestination[MAXLOCATIONSIZE+5];
   char ordinal[5];
   char plat[9];
+  char journey[7];
   int destPos;
 
   switch (line) {
@@ -1765,6 +1817,7 @@ void drawServiceLine(int line, int y) {
       u8g2.drawStr(0,y-1,ordinal);
       destPos = u8g2.drawStr(21,y-1,station.service[line].sTime) + 25;
     }
+    if (combineActive) destPos += u8g2.drawStr(destPos,y-1,station.service[line].fromCrs) + 5;
     char etd[16];
     if (isDigit(station.service[line].etd[0])) sprintf(etd,"Exp %s",station.service[line].etd);
     else strcpy(etd,station.service[line].etd);
@@ -1772,10 +1825,17 @@ void drawServiceLine(int line, int y) {
     u8g2.drawStr(SCREEN_WIDTH - etdWidth,y-1,etd);
     int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
+    int journeyWidth = 0;
+    if (formatJourneyTime(station.service[line].journeyMins,journey,sizeof(journey))) {
+      journeyWidth = getStringWidth(journey) + (journey[strlen(journey)-1]=='1'?1:0) + 7;
+      u8g2.drawStr(SCREEN_WIDTH - etdWidth - journeyWidth,y-1,journey);
+      spaceAvailable-=journeyWidth;
+    }
+
     if (station.platformAvailable && !hidePlatform && station.service[line].platform[0] && station.service[line].serviceType == TRAIN) {
       sprintf(plat,"Plat %.3s",station.service[line].platform);
       int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);
-      u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,y-1,plat);
+      u8g2.drawStr(SCREEN_WIDTH - etdWidth - journeyWidth - platWidth - 7,y-1,plat);
       spaceAvailable-=(platWidth+7);
     }
     // work out if we need to clip the destination
@@ -1954,8 +2014,79 @@ void drawStationBoard() {
   u8g2.sendBuffer();
 }
 
+// The time a service is expected to leave, falling back to the timetabled time when
+// there is no estimate (this is how the data clients sort a single station's board)
+const char *departureSortTime(const rdService &service) {
+  if (isDigit(service.etd[0]) && strlen(service.etd) == 5) return service.etd;
+  return service.sTime;
+}
+
+bool departsBefore(const rdService &a, const rdService &b) {
+  int hourA, minuteA, hourB, minuteB;
+  sscanf(departureSortTime(a),"%d:%d",&hourA,&minuteA);
+  sscanf(departureSortTime(b),"%d:%d",&hourB,&minuteB);
+  if (hourA != hourB) {
+    // Fudge for rollover at midnight
+    if (hourA < 2 && hourB > 20) return false;
+    if (hourB < 2 && hourA > 20) return true;
+    return hourA < hourB;
+  }
+  return minuteA < minuteB;
+}
+
+// Copy the messages from one of the combined boards, skipping any we already hold -
+// both stations usually report the same network wide messages
+void addBoardMessages(const stnMessages &source) {
+  for (int i=0;i<source.numMessages && messages.numMessages<MAXBOARDMESSAGES;++i) {
+    bool duplicate = false;
+    for (int j=0;j<messages.numMessages;++j) {
+      if (!strcmp(messages.messages[j],source.messages[i])) duplicate = true;
+    }
+    if (!duplicate) strcpy(messages.messages[messages.numMessages++],source.messages[i]);
+  }
+}
+
+// Interleave the two station boards into the displayed board, earliest departure first.
+// Both are already sorted, so the leading service is always the head of one of them and
+// its calling list is the one the board scrolls.
+void mergeStationBoards() {
+  int one=0, two=0;
+  bool leadFromOne = true;
+
+  station.numServices = 0;
+  while (station.numServices < MAXBOARDSERVICES && (one < stationOne.numServices || two < stationTwo.numServices)) {
+    bool takeFromOne;
+    if (one >= stationOne.numServices) takeFromOne = false;
+    else if (two >= stationTwo.numServices) takeFromOne = true;
+    else takeFromOne = departsBefore(stationOne.service[one],stationTwo.service[two]);
+
+    if (!station.numServices) leadFromOne = takeFromOne;
+    rdService &merged = station.service[station.numServices++];
+    if (takeFromOne) {
+      merged = stationOne.service[one++];
+      strlcpy(merged.fromCrs,locationCode,sizeof(merged.fromCrs));
+    } else {
+      merged = stationTwo.service[two++];
+      strlcpy(merged.fromCrs,combineCrsCode,sizeof(merged.fromCrs));
+    }
+  }
+
+  station.platformAvailable = stationOne.platformAvailable || stationTwo.platformAvailable;
+  snprintf(station.location,sizeof(station.location),"%s & %s",stationOne.location,stationTwo.location);
+
+  const rdStation &lead = leadFromOne ? stationOne : stationTwo;
+  strcpy(station.calling,station.numServices?lead.calling:"");
+  strcpy(station.origin,station.numServices?lead.origin:"");
+  strcpy(station.serviceMessage,station.numServices?lead.serviceMessage:"");
+
+  messages.numMessages = 0;
+  addBoardMessages(messagesOne);
+  addBoardMessages(messagesTwo);
+}
+
 void updateRailDepartures() {
-  if (useRDMclient) rdmRailData.loadDepartures(&station,&messages);
+  if (combineActive) mergeStationBoards();
+  else if (useRDMclient) rdmRailData.loadDepartures(&station,&messages);
   else darwinRailData.loadDepartures(&station,&messages);
   lastDataLoadTime = millis();
   noDataLoaded = false;
@@ -2431,6 +2562,7 @@ void handleInfo(AsyncWebServerRequest *request) {
   else if (carouselActive) message+="\nCarousel active, next event at " + String(nextSlotEventTime);
 
   message+="\nCurrent location code: " + String(locationCode) + "\nCurrent location name: " + String(locationName) + "\nSuccessful: " + String(dataLoadSuccess) + "\nFailures: " + String(dataLoadFailure) + "\nTime since last data load: " + String((int)((millis()-lastDataLoadTime)/1000)) + " seconds";
+  if (combineActive) message+="\nCombined with: " + String(combineCrsCode) + " (" + String(combineStation) + ")";
   if (dataLoadFailure) message+="\nTime since last failure: " + String((int)((millis()-lastLoadFailure)/1000)) + " seconds";
   message+="\nLast Result: ";
   switch (boardMode) {
@@ -3119,6 +3251,39 @@ void busDeparturesLoop() {
   }
 }
 
+bool railDataLoaded(int result) {
+  return result == UPD_SUCCESS || result == UPD_SEC_CHANGE || result == UPD_NO_CHANGE;
+}
+
+// Fetch one station of a combined board into its own buffer. That buffer is also the
+// previous copy the client compares against, so it is only refreshed on a good fetch.
+int fetchRailStation(const char *crsCode, rdStation *board, stnMessages *boardMessages) {
+  int result;
+  if (useRDMclient) {
+    result = rdmRailData.fetchDepartures(board,boardMessages,crsCode,rdmDeparturesApiKey,rdmServiceApiKey,MAXBOARDSERVICES,enableBus,callingCrsCode,locationCleanFilter,nrTimeOffset,(showLastSeen && !noScrolling),showServiceMsgs);
+    if (railDataLoaded(result)) rdmRailData.loadDepartures(board,boardMessages);
+  } else {
+    result = darwinRailData.fetchDepartures(board,boardMessages,crsCode,nrToken,MAXBOARDSERVICES,enableBus,callingCrsCode,locationCleanFilter,nrTimeOffset,(showLastSeen && !noScrolling),showServiceMsgs);
+    if (railDataLoaded(result)) darwinRailData.loadDepartures(board,boardMessages);
+  }
+  return result;
+}
+
+// Fetch both stations of a combined board. If either one fails we report the failure and
+// skip the merge, so the board keeps showing the last complete pair rather than half a
+// board - the same way a single station board rides out a failed refresh.
+int fetchCombinedDepartures() {
+  int resultOne = fetchRailStation(locationCode,&stationOne,&messagesOne);
+  if (!railDataLoaded(resultOne)) return resultOne;
+  int resultTwo = fetchRailStation(combineCrsCode,&stationTwo,&messagesTwo);
+  if (!railDataLoaded(resultTwo)) return resultTwo;
+
+  if (resultOne == UPD_NO_CHANGE && resultTwo == UPD_NO_CHANGE) return UPD_NO_CHANGE;
+  // Neither leading service changed, so only the lines below the primary one need redrawing
+  if (resultOne != UPD_SUCCESS && resultTwo != UPD_SUCCESS) return UPD_SEC_CHANGE;
+  return UPD_SUCCESS;
+}
+
 // The Core 0 Background Task
 void fetchDeparturesTask(void *pvParameters) {
   while(true) {
@@ -3131,7 +3296,9 @@ void fetchDeparturesTask(void *pvParameters) {
       case FETCH_BOARD:
         switch (boardMode) {
           case MODE_RAIL:
-            if (useRDMclient) {
+            if (combineActive) {
+              lastUpdateResult = fetchCombinedDepartures();
+            } else if (useRDMclient) {
               lastUpdateResult = rdmRailData.fetchDepartures(&station,&messages,locationCode,rdmDeparturesApiKey,rdmServiceApiKey,MAXBOARDSERVICES,enableBus,callingCrsCode,locationCleanFilter,nrTimeOffset,(showLastSeen && !noScrolling),showServiceMsgs);
             } else {
               lastUpdateResult = darwinRailData.fetchDepartures(&station,&messages,locationCode,nrToken,MAXBOARDSERVICES,enableBus,callingCrsCode,locationCleanFilter,nrTimeOffset,(showLastSeen && !noScrolling),showServiceMsgs);
