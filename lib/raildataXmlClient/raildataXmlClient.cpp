@@ -740,10 +740,10 @@ void raildataXmlClient::sanitiseData() {
     replaceWord(xMessages->messages[i],"<p>","");
     replaceWord(xMessages->messages[i],"</p>"," ");
     replaceWord(xMessages->messages[i],"<br>"," ");
-    replaceWord(xMessages->messages[i],"&nbsp;"," ");
 
     removeHtmlTags(xMessages->messages[i]);
     replaceWord(xMessages->messages[i],"&amp;","&");
+    replaceWord(xMessages->messages[i],"&nbsp;"," ");
     replaceWord(xMessages->messages[i],"&quot;","\"");
     // Remove unwanted text at the end of service messages...
     pruneFromPhrase(xMessages->messages[i]," More details ");
