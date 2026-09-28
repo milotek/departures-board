@@ -13,7 +13,8 @@ A model railway (00 gauge) version of this project is also available [here](http
 * Smooth animation matching the real departures and arrivals boards
 * Displays up to the next 9 departures with scheduled time, platform number, destination, calling stations and expected departure time
 * Optionally display the last reported location of a service
-* Optionally only show services calling at a selected railway station
+* Optionally only show services calling at a selected railway station, with the journey time to it
+* Optionally combine two railway stations onto a single board, interleaved by departure time
 * Scheduler and Carousel modes to automatically switch between any combination of railway, tube and bus stops
 * Displays Network Rail service messages
 * Train information (operator, class, number of coaches etc.)

@@ -55,6 +55,9 @@ class rdmRailClient: public JsonListenerGS {
         bool filterPlatforms = false;
         bool keepRoute = false;
 
+        char filterCrs[4];
+        bool atFilterStop = false;
+
         char stcp[6];
         char *endCAL;
 
@@ -64,6 +67,7 @@ class rdmRailClient: public JsonListenerGS {
         void pruneFromPhrase(char* input, const char* target);
         void fixFullStop(char* input);
         int timeDiff(const char *scheduled, const char *actual);
+        int journeyTo(const char *arrivalTime);
         void sanitiseData();
         void deleteService(int x);
         void trim(char* &start, char* &end);

@@ -197,6 +197,7 @@ int rdmRailClient::fetchDepartures(rdStation *station, stnMessages *messages, co
       xStation->service[i].trainLength=0;
       xStation->service[i].classesAvailable=0;
       xStation->service[i].serviceType=0;
+      xStation->service[i].journeyMins=0;
       xStation->service[i].isCancelled=false;
       xStation->service[i].isDelayed=false;
     }
@@ -262,6 +263,8 @@ int rdmRailClient::fetchDepartures(rdStation *station, stnMessages *messages, co
     parser.setListener(this);
     parser.reset();
     fetchingDepartures = true;
+    strlcpy(filterCrs,callingCrsCode,sizeof(filterCrs));
+    atFilterStop = false;
     long dataReceived = 0;
 
     if (platforms[0]) {
@@ -406,6 +409,7 @@ void rdmRailClient::loadDepartures(rdStation *station, stnMessages *messages) {
         station->service[i].classesAvailable = xStation->service[i].classesAvailable;
         strcpy(station->service[i].opco, xStation->service[i].opco);
         station->service[i].serviceType = xStation->service[i].serviceType;
+        station->service[i].journeyMins = xStation->service[i].journeyMins;
     }
     if (xStation->numServices) {
         strcpy(station->calling,xStation->service[0].calling);
@@ -546,6 +550,15 @@ void rdmRailClient::deleteService(int x) {
     xStation->service[i] = xStation->service[i+1];
   }
   xStation->numServices--;
+}
+
+// Minutes from this service's departure to the given time at the filtered calling point.
+// Both the arrival estimate and the departure time can be non-numeric ("Delayed"), in
+// which case there is no journey time to show.
+int rdmRailClient::journeyTo(const char *arrivalTime) {
+    if (!isdigit(arrivalTime[0]) || !isdigit(xStation->service[id].sTime[0])) return 0;
+    int mins = timeDiff(arrivalTime,xStation->service[id].sTime);
+    return mins > 0 ? mins : 0;
 }
 
 int rdmRailClient::timeDiff(const char *scheduled, const char *actual) {
@@ -693,10 +706,15 @@ void rdmRailClient::value(const char *value) {
                 strcat(xStation->service[id].calling,value);
                 addedStopLocation = true;
             }
+            atFilterStop = false;
+            return;
+        } else if (strcmp(js->currentKey, "crs")==0 && inCallingArray == 1 && addedStopLocation) {
+            atFilterStop = (filterCrs[0] && equalsIgnoreCase(value,strlen(value),filterCrs));
             return;
         } else if (strcmp(js->currentKey, "st")==0 && inCallingArray == 1 && addedStopLocation) {
             // Save the scheduled time of the calling point
             strlcpy(stcp,value,sizeof(stcp));
+            if (atFilterStop) xStation->service[id].journeyMins = journeyTo(stcp);
             return;
         } else if (strcmp(js->currentKey, "et")==0 && inCallingArray == 1 && addedStopLocation) {
             if (isdigit(value[0])) strlcpy(stcp,value,sizeof(stcp)); // Use the eta if available
@@ -704,9 +722,13 @@ void rdmRailClient::value(const char *value) {
             if ((strlen(xStation->service[id].calling) + strlen(stcp) + 4) < sizeof(xStation->service[0].calling)) {
                 sprintf(xStation->service[id].calling + strlen(xStation->service[id].calling)," (%s)",stcp);
             }
+            if (atFilterStop) xStation->service[id].journeyMins = journeyTo(stcp);
             return;
         } else if (strcmp(js->currentKey, "isCancelled")==0 && inCallingArray == 1 && addedStopLocation) {
-            if (strcmp(value,"true")==0) *endCAL = '\0'; // remove this calling point, it's cancelled
+            if (strcmp(value,"true")==0) {
+                *endCAL = '\0'; // remove this calling point, it's cancelled
+                if (atFilterStop) xStation->service[id].journeyMins = 0; // the train no longer gets there
+            }
             addedStopLocation = false;
             return;
         } else if (strcmp(js->currentKey, "coachClass")==0 && strcmp(js->arrayName, "formation/coaches")==0 && arrayNestLevel==2) {

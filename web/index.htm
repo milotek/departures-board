@@ -81,6 +81,19 @@
           <input id="searchName" type="text" placeholder="Type the station name" class="form-control typeahead">
         </div>
 
+        <div class="mb-3" id="nrCombineBox" style="display:none">
+          <label class="form-label" for="combineStation">Combine with a second station</label>
+          <div style="display:flex;gap:10px;">
+            <div style="flex:1;">
+              <input id="combineStation" type="text" placeholder="Station name or leave blank for a single station board"
+                class="form-control typeahead" style="width:100%;">
+            </div>
+            <div style="flex-shrink:0;">
+              <button id="clearCombine" name="clearCombine" class="btn btn-secondary" type="button">Clear</button>
+            </div>
+          </div>
+        </div>
+
         <div class="mb-3" id="nrCallingBox" style="display:none">
           <label class="form-label" for="callingStation">Only show services calling at</label>
           <div style="display:flex;gap:10px;">
@@ -791,6 +804,9 @@
       callingStationSelected: false,
       callingStation: "",
       callingCrs: "",
+      combineStationSelected: false,
+      combineStation: "",
+      combineCrs: "",
       tzOK: true,
       hostnameOK: true,
       validNatRailToken: true,
@@ -816,6 +832,7 @@
       tubeDirectionFilterBox: document.getElementById("tflDirectionFilterBox"),
       tubeDirectionFilter: document.getElementById("tubeDirectionFilter"),
       callingStation: document.getElementById("callingStation"),
+      combineStation: document.getElementById("combineStation"),
       platformFilter: document.getElementById("platformFilter"),
       brightness: document.getElementById("brightness"),
       enableSleep: document.getElementById("enableSleep"),
@@ -824,6 +841,7 @@
       darkSleep: document.getElementById("darkSleep"),
       saveButton: document.getElementById("save"),
       clearButton: document.getElementById("clearFilter"),
+      clearCombineButton: document.getElementById("clearCombine"),
       fwinfo: document.getElementById("fwinfo"),
       verifyAtcoButton: document.getElementById("verifyAtco"),
       busAtco: document.getElementById("busAtco"),
@@ -853,6 +871,7 @@
 
     const busFilterError="Please enter a valid list of bus services to filter on, or leave blank for all services.";
     const platformFilterError="Please enter a valid list of platforms to filter on, or leave blank for all services.";
+    const combineSameStationError="Please choose a different station to combine with, or leave blank for a single station board.";
     const tzError="Please enter a valid POSIX format timezone string or uncheck the \"Custom timezone\" option to use UK time.";
     const hostnameError="Please enter a valid hostname or uncheck the \"Custom hostname\" option to use the default \"DeparturesBoard\".";
     const MAX_BUS_ATCOS=10;
@@ -1226,6 +1245,19 @@
       }
     });
 
+    $(elements.combineStation).typeahead({
+      name: 'stations',
+      source: substringMatcher(),
+      delay: 300,
+      updater: function (item) {
+        handleCombineStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="nr.webp" style="margin-right:6px">' + item;
+      }
+    });
+
     $(elements.searchNameTfL).typeahead({
       name: 'stations',
       source: substringMatcherTfL(),
@@ -1252,6 +1284,8 @@
     elements.searchName.addEventListener("blur", () => setTimeout(handleStationLostFocus, 500));
     elements.callingStation.addEventListener("focus", () => elements.callingStation.select());
     elements.callingStation.addEventListener("blur", () => setTimeout(handleCallingStationLostFocus, 500));
+    elements.combineStation.addEventListener("focus", () => elements.combineStation.select());
+    elements.combineStation.addEventListener("blur", () => setTimeout(handleCombineStationLostFocus, 500));
     elements.platformFilter.addEventListener("blur", validatePlatformFilter);
     elements.searchNameTfL.addEventListener("focus", () => elements.searchNameTfL.select());
     elements.searchNameTfL.addEventListener("blur", () => setTimeout(handleTfLStationLostFocus, 500));
@@ -1271,6 +1305,7 @@
     elements.darkSleep.addEventListener("change", () => { show("optSleepUseBigClock", !isChecked("darkSleep"));})
     elements.brightness.addEventListener("change", handleBrightnessChange);
     elements.clearButton.addEventListener("click", handleClearFilter);
+    elements.clearCombineButton.addEventListener("click", handleClearCombine);
     elements.verifyAtcoButton.addEventListener("click", handleVerifyAtco);
     elements.clearHistoryButton.addEventListener("click", handleClearHistory);
     elements.busAtcoHistoryList.addEventListener('change', handleAtcoHistorySelect);
@@ -1567,6 +1602,7 @@
 
       show("nrT", rail);
       show("nrSearchBox", rail);
+      show("nrCombineBox", rail);
       show("nrCallingBox", rail);
       show("nrAtt", rail && appState.dataSource == 0);
       show("rdgAtt", rail && appState.dataSource == 1);
@@ -1645,12 +1681,14 @@
         };
 
         if (appState.boardMode === 0) { // Rail
-            config.name = appState.stationName;
+            config.name = appState.stationName + (appState.combineStation ? ` & ${appState.combineStation}` : "");
             config.crs = appState.stationCRS;
             config.lat = appState.stationLatitude;
             config.lon = appState.stationLongitude;
             config.callingStation = appState.callingStation;
             config.callingCrs = appState.callingCrs;
+            config.combineStation = appState.combineStation;
+            config.combineCrs = appState.combineCrs;
             config.platformFilter = appState.platformFilter;
             config.filter = [appState.callingStation ? `Calling at: ${appState.callingStation}` : "",
                               appState.platformFilter ? `Platform: ${appState.platformFilter}` : ""].filter(Boolean).join(", ");
@@ -1753,6 +1791,8 @@
 
       appState.callingStation = s.callingStation || "";
       appState.callingCrs = s.callingCrs || "";
+      appState.combineStation = s.combineStation || "";
+      appState.combineCrs = s.combineCrs || "";
       appState.platformFilter = s.platformFilter || "";
 
       appState.tubeName = s.tubeName || "";
@@ -1778,6 +1818,7 @@
       highlightModeButtons(appState.boardMode);
       elements.searchName.value = appState.stationName;
       elements.callingStation.value = appState.callingStation;
+      elements.combineStation.value = appState.combineStation;
       elements.platformFilter.value = appState.platformFilter;
       elements.searchNameTfL.value = appState.tubeName;
       if (appState.tubeId) {
@@ -1868,6 +1909,17 @@
       appState.callingCrs = item.crsCode;
     }
 
+    function handleCombineStationSelected(item) {
+      appState.combineStationSelected = true;
+      if (item.crsCode === appState.stationCRS) {
+        bsAlert(combineSameStationError);
+        handleClearCombine();
+        return;
+      }
+      appState.combineStation = item.name;
+      appState.combineCrs = item.crsCode;
+    }
+
     async function fetchTubeLines(stopPointId, selectedLineId = "all") {
       try {
         const response = await fetch(`https://api.tfl.gov.uk/StopPoint/${stopPointId}?app_key=${appState.appKey}`);
@@ -1948,6 +2000,14 @@
       }
     }
 
+    function handleCombineStationLostFocus() {
+      if (!appState.combineStationSelected) {
+        elements.combineStation.value = appState.combineStation;
+      } else {
+        appState.combineStationSelected = false;
+      }
+    }
+
     function handleTfLStationLostFocus() {
       if (!appState.stationSelectedTfL) {
         elements.searchNameTfL.value = appState.tubeName;
@@ -1961,6 +2021,13 @@
       appState.callingStation = "";
       appState.callingStationSelected = false;
       elements.callingStation.value = appState.callingStation;
+    }
+
+    function handleClearCombine() {
+      appState.combineCrs = "";
+      appState.combineStation = "";
+      appState.combineStationSelected = false;
+      elements.combineStation.value = appState.combineStation;
     }
 
     function handleBrightnessChange() {
@@ -1980,6 +2047,8 @@
       s.lon = appState.stationLongitude;
       s.callingStation = appState.callingStation;
       s.callingCrs = appState.callingCrs;
+      s.combineStation = appState.combineStation;
+      s.combineCrs = appState.combineCrs;
       s.platformFilter = appState.platformFilter;
       s.tubeId = appState.tubeId;
       s.tubeName = appState.tubeName;
